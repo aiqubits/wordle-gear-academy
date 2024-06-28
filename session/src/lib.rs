@@ -1,59 +1,162 @@
 #![no_std]
-use gstd::{msg, prelude::*, ActorId, MessageId};
+use gstd::{exec, msg, prelude::*, ActorId, MessageId};
+use session_game_io::*;
 use wordle_game_io::*;
 
-#[derive(Debug, Default, Clone, Encode, Decode, TypeInfo)]
-struct Session {
-    target_program_id: ActorId,               // target program address
-    msg_id_to_actor_id: (MessageId, ActorId), // tuple containing the identifier of a message sent to a Target program and the Id of a User initiating the action
+static mut GAMES: Option<State> = None;
+static mut TARGET_PROGRAM_ID: ActorId = ActorId::zero();
+
+fn is_word_lowercase(word: String) -> bool {
+    if word.is_empty() {
+        return false;
+    }
+    word.chars().all(|c| c.is_lowercase())
 }
 
-static mut SESSION: Option<Session> = None;
+// Check if actorid exists and has a session, if so, the game exists, otherwise it does not exist
+fn is_exist_game(user_id: &ActorId) -> bool {
+    unsafe {
+        if let Some(games) = GAMES.as_ref() {
+            if games.get(user_id).is_some() {
+                return true;
+            }
+        }
+    }
+    false
+}
 
 #[no_mangle]
 extern "C" fn init() {
     // Receives and stores the Wordle program's address.
     let target_program_id = msg::load().expect("Unable to decode Init");
+
     unsafe {
-        SESSION = Some(Session {
-            target_program_id,
-            msg_id_to_actor_id: (MessageId::zero(), ActorId::zero()),
-        });
+        TARGET_PROGRAM_ID = target_program_id;
+        GAMES = Some(State::new());
     }
 }
 
 #[no_mangle]
 extern "C" fn handle() {
-    // Manages actions: StartGame, CheckWord, CheckGameStatus. Let's examine the functionality of each action:
-    // StartGame
-    // The program checks if a game already exists for the user;
-    // It sends a "StartGame" message to the Wordle program;
-    // Utilizes the exec::wait() or exec::wait_for() function to await a response;
-    // Sends a delayed message with action CheckGameStatus to monitor the game's progress (its logic will be described below);
-    // A reply is sent to notify the user that the game has beeen successfully started.
+    let action: Action = msg::load().expect("Unable to decode `Action`");
 
-    // CheckWord
-    // Ensures that a game exists and is in the correct status;
-    // Validates that the submitted word length is five and is in lowercase;
-    // Sends a "CheckWord" message to the Wordle program;
-    // Utilizes the exec::wait() or exec::wait_for() function to await a reply;
-    // Sends a reply to notify the user that the move was successful.
+    let user_id = msg::source();
 
-    // CheckGameStatus
-    // The game should have a time limit from its start, so a delayed message is sent to check the game status. If the game is not finished within the specified time limit, it ends the game by transitioning it to the desired status. Specify a delay equal to 200 blocks (10 minutes) for the delayed message.
+    let games = unsafe { GAMES.as_mut().expect("The session is not initialized") };
 
-    let action: WordleAction = msg::load().expect("Unable to decode ");
-    let session = unsafe { SESSION.as_mut().expect("The session is not initialized") };
-    let msg_id =
-        msg::send(session.target_program_id, action, 0).expect("Error in sending a message");
-    session.msg_id_to_actor_id = (msg_id, msg::source());
-    msg::reply(
-        WordleEvent::GameStarted {
-            user: msg::source(),
-        },
-        0,
-    )
-    .expect("Error in sending a reply");
+    if !is_exist_game(&user_id) {
+        let session: Session = Session {
+            msg_ids: (MessageId::zero(), MessageId::zero()),
+            session_status: SessionStatus::None,
+            tries_number: 0,
+        };
+
+        games.insert(user_id, session);
+    }
+
+    match action {
+        Action::StartGame => {
+            let session = games.get_mut(&user_id).expect("Unable to decode Init");
+
+            // let session_status = session.session_status.clone();
+            if session.session_status == SessionStatus::None {
+                unsafe {
+                    let msg_id = msg::send(
+                        TARGET_PROGRAM_ID,
+                        WordleAction::StartGame { user: user_id },
+                        0,
+                    )
+                    .expect("Error in sending a StartGame message");
+
+                    session.msg_ids = (msg_id, msg::id());
+                }
+
+                msg::send_delayed(exec::program_id(), Action::CheckGameStatus, 0, 200)
+                    .expect("Error in sending a CheckSelf Delayed message");
+
+                exec::wait_for(3);
+            } else if session.session_status == SessionStatus::GameStarted {
+                session.session_status = SessionStatus::Waiting;
+                exec::leave();
+            } else if session.session_status == SessionStatus::GameOver(Outcome::Win)
+                || session.session_status == SessionStatus::GameOver(Outcome::Lose)
+            {
+                unsafe {
+                    let msg_id = msg::send(
+                        TARGET_PROGRAM_ID,
+                        WordleAction::StartGame { user: user_id },
+                        0,
+                    )
+                    .expect("Error in sending a StartGame message");
+
+                    let session = Session {
+                        msg_ids: (msg_id, msg::id()),
+                        session_status: SessionStatus::GameStarted,
+                        tries_number: 0,
+                    };
+
+                    games.insert(user_id, session.clone());
+                }
+
+                exec::wait_for(3);
+            }
+        }
+
+        Action::CheckWord(word) => {
+            let session = games.get_mut(&user_id).expect("Unable to decode Init");
+            if !is_exist_game(&user_id) {
+                panic!("HANDLE: Action::CheckWord not_exist_game");
+            }
+
+            if word.len() != 5 && !is_word_lowercase(word.clone()) {
+                msg::reply(SessionStatus::InvalidWord, 0)
+                    .expect("Error in replying a InvalidWord message");
+                panic!("HANDLE: Action::CheckWord  invaild vord: {:?}", word);
+            }
+
+            let session_status = session.session_status.clone();
+
+            if session_status == SessionStatus::Waiting {
+                // let send_word = word.clone();
+                unsafe {
+                    let _msg_id = msg::send(
+                        TARGET_PROGRAM_ID,
+                        WordleAction::CheckWord {
+                            user: user_id,
+                            word,
+                        },
+                        0,
+                    )
+                    .expect("Error in sending a CheckWord message");
+                }
+
+                exec::wait_for(20);
+            }
+
+            if session_status == SessionStatus::GameOver(Outcome::Win)
+                || session_status == SessionStatus::GameOver(Outcome::Lose)
+            {
+                msg::reply(session_status, 0).expect("Error in replying a GameOver message");
+            }
+
+            exec::leave();
+        }
+        Action::CheckGameStatus => {
+            let session = games.get_mut(&user_id).expect("Unable to decode Init");
+            if session.session_status == SessionStatus::None && msg::source() == exec::program_id()
+            {
+                msg::send(user_id, SessionStatus::NoReplyReceived, 0)
+                    .expect("Error in sending a message");
+                session.session_status = SessionStatus::GameStarted;
+
+                exec::wait_for(20);
+            } else {
+                let _ = msg::reply(session.session_status.clone(), 0);
+            }
+
+            exec::leave();
+        }
+    }
 }
 
 #[no_mangle]
@@ -70,30 +173,104 @@ extern "C" fn handle_reply() {
 
     // Calls wake() with the identifier of the received message to acknowledge the response.
 
-    let reply_message_id = msg::reply_to().expect("Failed to query reply_to data");
-    let session = unsafe { SESSION.as_mut().expect("The session is not initialized") };
-    let (msg_id, actor) = session.msg_id_to_actor_id;
-    if reply_message_id == msg_id {
-        let reply: WordleEvent = msg::load().expect("Unable to decode ");
-        msg::send(actor, reply, 0).expect("Error in sending a message");
+    let reply_to = msg::reply_to().expect("Failed to query reply_to data");
+    let reply_message = msg::load().expect("Unable to decode `Event`");
+    let games = unsafe { GAMES.as_mut().expect("The session is not initialized") };
+
+    match reply_message {
+        WordleEvent::GameStarted { user } => {
+            let session = games.get_mut(&user).expect("Failed to get session");
+
+            if is_exist_game(&user) && reply_to == session.msg_ids.0 {
+                session.session_status = SessionStatus::GameStarted;
+
+                msg::send(user, SessionStatus::GameStarted, 0)
+                    .expect("Error in sending a HANDLE_REPLY message");
+            }
+
+            exec::wake(session.msg_ids.1).expect("Failed to wake message");
+        }
+
+        WordleEvent::WordChecked {
+            user,
+            ref correct_positions,
+            ref contained_in_word,
+        } => {
+            let correct_positions_c = correct_positions.clone();
+            let contained_in_word_c = contained_in_word.clone();
+            let session = games.get_mut(&user).expect("Failed to get session");
+
+            msg::send(
+                user,
+                SessionStatus::WordChecked {
+                    user,
+                    correct_positions: correct_positions_c,
+                    contained_in_word: contained_in_word_c,
+                },
+                0,
+            )
+            .expect("Error in sending a HANDLE_REPLY message");
+            session.tries_number += 1;
+
+            if correct_positions.len() == 5 && contained_in_word.is_empty() {
+                session.session_status = SessionStatus::GameOver(Outcome::Win);
+            } else if session.tries_number > 3 {
+                session.session_status = SessionStatus::GameOver(Outcome::Lose);
+            } else {
+                session.session_status = SessionStatus::Waiting;
+            }
+
+            // WAKE for wait_for
+            exec::wake(session.msg_ids.1).expect("Failed to wake message");
+        }
     }
 }
 
 #[no_mangle]
 pub extern "C" fn state() {
     // It is necessary to implement the state() function in order to get all the information about the game.
-    let wordle_game = unsafe { SESSION.take().expect("Error in taking current state") };
+    let query = msg::load().expect("Failed to load query");
+    let state = unsafe { GAMES.take().expect("Error in taking current state") };
 
     // Checks input data for validness
-
-    // returns the `GameState` structure using the `msg::reply` function
-    msg::reply(wordle_game, 0).expect("Failed to reply state");
+    let reply = match query {
+        StateQuery::All => StateQueryReply::All(state.into_keys().collect()),
+        StateQuery::Player(address) => {
+            let session = state.get(&address).expect("Can't find this player");
+            StateQueryReply::Game(session.clone())
+        }
+    };
+    msg::reply(reply, 0).expect("Failed to reply state");
 }
 
 #[cfg(test)]
 mod tests {
-    use gstd::*;
+    use super::*;
 
     #[test]
-    fn test_check_user_input() {}
+    fn test_is_word_lowercase() {
+        assert!(is_word_lowercase("hello".to_string()));
+        assert!(!is_word_lowercase("HELLO".to_string()));
+        assert!(!is_word_lowercase("HeLLo".to_string()));
+        assert!(!is_word_lowercase("".to_string()));
+        assert!(!is_word_lowercase(" ".to_string()));
+        assert!(!is_word_lowercase("12345".to_string()));
+    }
+
+    #[test]
+    fn test_is_exist_game() {
+        let user_id = ActorId::from([1; 32]);
+        let mut games = State::new();
+        let session = Session {
+            msg_ids: (MessageId::zero(), MessageId::zero()),
+            session_status: SessionStatus::None,
+            tries_number: 0,
+        };
+        games.insert(user_id, session.clone());
+        unsafe {
+            GAMES = Some(games);
+        }
+        assert!(is_exist_game(&user_id));
+        assert!(!is_exist_game(&ActorId::from([2; 32])));
+    }
 }
