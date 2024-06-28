@@ -1,99 +1,135 @@
 #![no_std]
-use gstd::{msg, prelude::*, ActorId, MessageId};
+use gstd::{debug, exec, msg, prelude::*, ActorId, MessageId};
 use wordle_game_io::*;
 
-#[derive(Debug, Default, Clone, Encode, Decode, TypeInfo)]
-struct Session {
-    target_program_id: ActorId,               // target program address
-    msg_id_to_actor_id: (MessageId, ActorId), // tuple containing the identifier of a message sent to a Target program and the Id of a User initiating the action
-}
+type SentMessageId = MessageId;
+type OriginalMessageId = MessageId;
 
 static mut SESSION: Option<Session> = None;
 
+#[derive(Debug, Clone, Encode, Decode, TypeInfo, PartialEq)]
+#[codec(crate = gstd::codec)]
+#[scale_info(crate = gstd::scale_info)]
+struct Session {
+    target_program_id: ActorId,
+    msg_ids: (SentMessageId, OriginalMessageId, ActorId),
+    session_status: SessionStatus,
+}
+
+#[derive(Debug, Clone, Encode, Decode, TypeInfo, PartialEq)]
+#[codec(crate = gstd::codec)]
+#[scale_info(crate = gstd::scale_info)]
+enum SessionStatus {
+    Waiting,
+    MessageSent,
+    ReplyReceived(Event),
+}
+
 #[no_mangle]
 extern "C" fn init() {
-    // Receives and stores the Wordle program's address.
     let target_program_id = msg::load().expect("Unable to decode Init");
     unsafe {
         SESSION = Some(Session {
             target_program_id,
-            msg_id_to_actor_id: (MessageId::zero(), ActorId::zero()),
+            msg_ids: (MessageId::zero(), MessageId::zero(), ActorId::zero()),
+            session_status: SessionStatus::Waiting,
         });
     }
 }
 
 #[no_mangle]
 extern "C" fn handle() {
-    // Manages actions: StartGame, CheckWord, CheckGameStatus. Let's examine the functionality of each action:
-    // StartGame
-    // The program checks if a game already exists for the user;
-    // It sends a "StartGame" message to the Wordle program;
-    // Utilizes the exec::wait() or exec::wait_for() function to await a response;
-    // Sends a delayed message with action CheckGameStatus to monitor the game's progress (its logic will be described below);
-    // A reply is sent to notify the user that the game has beeen successfully started.
-
-    // CheckWord
-    // Ensures that a game exists and is in the correct status;
-    // Validates that the submitted word length is five and is in lowercase;
-    // Sends a "CheckWord" message to the Wordle program;
-    // Utilizes the exec::wait() or exec::wait_for() function to await a reply;
-    // Sends a reply to notify the user that the move was successful.
-
-    // CheckGameStatus
-    // The game should have a time limit from its start, so a delayed message is sent to check the game status. If the game is not finished within the specified time limit, it ends the game by transitioning it to the desired status. Specify a delay equal to 200 blocks (10 minutes) for the delayed message.
-
-    let action: WordleAction = msg::load().expect("Unable to decode ");
+    debug!("!!!! HANDLE !!!!");
+    debug!("Message ID: {:?}", msg::id());
+    let action: Action = msg::load().expect("Unable to decode `Action`");
+    debug!("Message payload: {:?}", action);
     let session = unsafe { SESSION.as_mut().expect("The session is not initialized") };
-    let msg_id =
-        msg::send(session.target_program_id, action, 0).expect("Error in sending a message");
-    session.msg_id_to_actor_id = (msg_id, msg::source());
-    msg::reply(
-        WordleEvent::GameStarted {
-            user: msg::source(),
-        },
-        0,
-    )
-    .expect("Error in sending a reply");
+
+    match action {
+        Action::SendMessage(message_action) => {
+            if session.session_status == SessionStatus::Waiting {
+                debug!("HANDLE: Action::SendMessage and SessionStatus::Waiting");
+                let msg_id = msg::send(session.target_program_id, message_action, 0)
+                    .expect("Error in sending a message");
+
+                debug!("HANDLE: SessionStatus::MessageSent");
+                session.session_status = SessionStatus::MessageSent;
+                session.msg_ids = (msg_id, msg::id(), msg::source());
+
+                msg::send_delayed(exec::program_id(), Action::CheckReply, 0, 3)
+                    .expect("Error in sending a message");
+                msg::reply(Event::MessageSent, 0).expect("Error in sending a reply");
+                debug!("HANDLE: WAIT");
+            } else {
+                debug!("HANDLE: Event::WrongStatus");
+                msg::reply(Event::WrongStatus, 0).expect("Error in sending a reply");
+            }
+        }
+        Action::CheckReply => {
+            debug!("HANDLE: Action::CheckReply");
+            if session.session_status == SessionStatus::MessageSent
+                && msg::source() == exec::program_id()
+            {
+                debug!("HANDLE: No response was received");
+                msg::send(session.msg_ids.2, Event::NoReplyReceived, 0)
+                    .expect("Error in sending a message");
+                debug!("HANDLE: SessionStatus::Waiting");
+                session.session_status = SessionStatus::Waiting;
+
+                exec::wait_for(20);
+            }
+        }
+    }
+    // match session_status
+    // match &session.session_status {
+    //     SessionStatus::Waiting => {
+    //         debug!("HANDLE: SessionStatus::Waiting");
+    //         let msg_id = msg::send(session.target_program_id, action, 0)
+    //             .expect("Error in sending a message");
+    //         debug!("HANDLE: SessionStatus::Sent");
+    //         session.session_status = SessionStatus::MessageSent;
+    //         session.msg_ids = (msg_id, msg::id());
+    //         debug!("HANDLE: WAIT");
+    //         exec::wait_for(3);
+    //     }
+    //     SessionStatus::MessageSent => {
+    //         if msg::id() == session.msg_ids.1 {
+    //             debug!("HANDLE: No response was received");
+    //             msg::reply(Event::NoReplyReceived, 0).expect("Error in sending a reply");
+    //             debug!("HANDLE: SessionStatus::Waiting");
+    //             session.session_status = SessionStatus::Waiting;
+    //         } else {
+    //             debug!("HANDLE: Event::MessageAlreadySent");
+    //             msg::reply(Event::MessageAlreadySent, 0).expect("Error in sending a reply");
+    //         }
+    //     }
+    //     SessionStatus::ReplyReceived(reply_message) => {
+    //         debug!("HANDLE: SessionStatus::ReplyReceived({:?})", reply_message);
+    //         msg::reply(reply_message, 0).expect("Error in sending a reply");
+    //         debug!("HANDLE: SessionStatus::Waiting");
+    //         session.session_status = SessionStatus::Waiting;
+    //     }
+    // }
+    debug!("HANDLE: END");
 }
 
 #[no_mangle]
 extern "C" fn handle_reply() {
-    // Processes reply messages and updates the game status based on responses from the Wordle program.
-    // Receives reply messages.
-    // Utilizes msg::reply_to() to determine the message identifier, i.e., which message was replied to.
-
-    // Processes and stores the result depending on the reply:
-    // If a GameStarted response is received, it updates the game status to indicate that the game was successfully started.
-    // If a WordChecked response is received, it saves the response, increments the number of tries, and checks if the word was guessed.
-    // If the word has been guessed, it switches the game status to GameOver(Win).
-    //If all attempts are used up and the word is not guessed, it switches the game status to GameOver(Lose).
-
-    // Calls wake() with the identifier of the received message to acknowledge the response.
-
-    let reply_message_id = msg::reply_to().expect("Failed to query reply_to data");
+    debug!("HANDLE_REPLY");
+    let reply_to = msg::reply_to().expect("Failed to query reply_to data");
     let session = unsafe { SESSION.as_mut().expect("The session is not initialized") };
-    let (msg_id, actor) = session.msg_id_to_actor_id;
-    if reply_message_id == msg_id {
-        let reply: WordleEvent = msg::load().expect("Unable to decode ");
-        msg::send(actor, reply, 0).expect("Error in sending a message");
+
+    if reply_to == session.msg_ids.0 && session.session_status == SessionStatus::MessageSent {
+        let reply_message: Event = msg::load().expect("Unable to decode `Event`");
+        debug!(
+            "HANDLE_REPLY: SessionStatus::ReplyReceived {:?}",
+            reply_message
+        );
+        session.session_status = SessionStatus::ReplyReceived(reply_message);
+
+        // WAKE for wait_for
+        let original_message_id = session.msg_ids.1;
+        debug!("HANDLE: WAKE");
+        exec::wake(original_message_id).expect("Failed to wake message");
     }
-}
-
-#[no_mangle]
-pub extern "C" fn state() {
-    // It is necessary to implement the state() function in order to get all the information about the game.
-    let wordle_game = unsafe { SESSION.take().expect("Error in taking current state") };
-
-    // Checks input data for validness
-
-    // returns the `GameState` structure using the `msg::reply` function
-    msg::reply(wordle_game, 0).expect("Failed to reply state");
-}
-
-#[cfg(test)]
-mod tests {
-    use gstd::*;
-
-    #[test]
-    fn test_check_user_input() {}
 }

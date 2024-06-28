@@ -5,13 +5,14 @@ edition = "2021"
 
 [dependencies]
 gstd = { git = "https://github.com/gear-tech/gear.git", tag = "v1.4.1",features = ["debug"] }
-wordle-game-io.path = "io"
+parity-scale-codec = { version = "3", default-features = false }
+scale-info = { version = "2", default-features = false }
 
 [build-dependencies]
 gear-wasm-builder = { git = "https://github.com/gear-tech/gear.git", tag = "v1.4.1" }
-wordle-game-io.path = "io"
 
 [dev-dependencies]
 gstd = { git = "https://github.com/gear-tech/gear.git", tag = "v1.4.1", features = ["debug"] }
 gtest = { git = "https://github.com/gear-tech/gear.git", tag = "v1.4.1" }
-wordle-game-io.path = "io"
+parity-scale-codec = { version = "3", default-features = false }
+scale-info = { version = "2", default-features = false }
