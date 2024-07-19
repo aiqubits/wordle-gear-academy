@@ -39,6 +39,7 @@ pub enum SessionStatus {
     None,
     GameStarted,
     Waiting,
+    MessageSent,
     GameOver(Outcome),
     WordChecked {
         user: ActorId,

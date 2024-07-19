@@ -108,13 +108,19 @@ extern "C" fn handle() {
                 panic!("HANDLE: Action::CheckWord not_exist_game");
             }
 
+            let session_status = session.session_status.clone();
+
+            if session_status == SessionStatus::MessageSent {
+                msg::reply(SessionStatus::MessageSent, 0)
+                    .expect("Error in replying a MessageSent message");
+                exec::leave();
+            }
+
             if word.len() != 5 && !is_word_lowercase(word.clone()) {
                 msg::reply(SessionStatus::InvalidWord, 0)
                     .expect("Error in replying a InvalidWord message");
                 panic!("HANDLE: Action::CheckWord  invaild vord: {:?}", word);
             }
-
-            let session_status = session.session_status.clone();
 
             if session_status == SessionStatus::Waiting {
                 // let send_word = word.clone();
@@ -129,7 +135,7 @@ extern "C" fn handle() {
                     )
                     .expect("Error in sending a CheckWord message");
                 }
-
+                session.session_status = SessionStatus::MessageSent;
                 exec::wait_for(20);
             }
 
