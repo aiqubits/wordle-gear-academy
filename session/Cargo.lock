@@ -3877,6 +3877,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "session-game-io"
+version = "0.1.0"
+dependencies = [
+ "enum-iterator 2.1.0",
+ "gmeta",
+ "gstd",
+ "parity-scale-codec",
+ "scale-info",
+]
+
+[[package]]
 name = "session-proxy"
 version = "0.1.0"
 dependencies = [
@@ -3886,6 +3897,7 @@ dependencies = [
  "gtest",
  "parity-scale-codec",
  "scale-info",
+ "session-game-io",
  "wordle-game-io",
 ]
 

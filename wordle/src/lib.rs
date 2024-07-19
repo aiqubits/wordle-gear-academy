@@ -22,6 +22,7 @@ extern "C" fn init() {
 
 #[no_mangle]
 extern "C" fn handle() {
+    // exec::wait();
     let action: WordleAction = msg::load().expect("Unable to decode ");
     let wordle = unsafe { WORDLE.as_mut().expect("The program is not initialized") };
 
@@ -49,7 +50,6 @@ extern "C" fn handle() {
                     key_indices.push(i as u8);
                 }
             }
-
             WordleEvent::WordChecked {
                 user,
                 correct_positions: matched_indices,
@@ -57,7 +57,6 @@ extern "C" fn handle() {
             }
         }
     };
-
     msg::reply(reply, 0).expect("Error in sending a reply");
 }
 
